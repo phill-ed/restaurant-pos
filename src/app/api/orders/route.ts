@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import db, { generateId } from '@/lib/db';
+import { query, transaction, generateId } from '@/lib/db';
 
 // GET all orders
 export async function GET(request: NextRequest) {
@@ -12,7 +12,7 @@ export async function GET(request: NextRequest) {
     const endDate = searchParams.get('endDate');
     const activeOnly = searchParams.get('activeOnly');
 
-    let query = `
+    let queryText = `
       SELECT o.*, t.number as table_number, c.name as customer_name
       FROM orders o
       LEFT JOIN tables t ON o.table_id = t.id
@@ -22,43 +22,43 @@ export async function GET(request: NextRequest) {
     const params: (string | number)[] = [];
 
     if (status) {
-      query += ' AND o.status = ?';
+      queryText += ' AND o.status = $' + (params.length + 1);
       params.push(status);
     }
 
     if (tableId) {
-      query += ' AND o.table_id = ?';
+      queryText += ' AND o.table_id = $' + (params.length + 1);
       params.push(tableId);
     }
 
     if (serverId) {
-      query += ' AND o.server_id = ?';
+      queryText += ' AND o.server_id = $' + (params.length + 1);
       params.push(serverId);
     }
 
     if (startDate) {
-      query += ' AND o.created_at >= ?';
+      queryText += ' AND o.created_at >= $' + (params.length + 1);
       params.push(startDate);
     }
 
     if (endDate) {
-      query += ' AND o.created_at <= ?';
+      queryText += ' AND o.created_at <= $' + (params.length + 1);
       params.push(endDate);
     }
 
     if (activeOnly === 'true') {
-      query += " AND o.status NOT IN ('paid', 'cancelled')";
+      queryText += " AND o.status NOT IN ('paid', 'cancelled')";
     }
 
-    query += ' ORDER BY o.created_at DESC';
+    queryText += ' ORDER BY o.created_at DESC';
 
-    const orders = db.prepare(query).all(...params);
-
+    const result = await query(queryText, params);
+    
     // Fetch order items for each order
-    const ordersWithItems = orders.map((order: any) => {
-      const items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id);
-      return { ...order, items };
-    });
+    const ordersWithItems = await Promise.all(result.rows.map(async (order: any) => {
+      const itemsResult = await query('SELECT * FROM order_items WHERE order_id = $1', [order.id]);
+      return { ...order, items: itemsResult.rows };
+    }));
 
     return NextResponse.json(ordersWithItems);
   } catch (error) {
@@ -73,40 +73,46 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { tableId, customerId, serverId, items, notes } = body;
 
-    // Calculate totals
-    const subtotal = items.reduce((sum: number, item: any) => sum + (item.price * item.quantity), 0);
-    const taxRate = 0.08;
-    const tax = subtotal * taxRate;
-    const total = subtotal + tax;
+    const result = await transaction(async (client) => {
+      // Calculate totals
+      const subtotal = items.reduce((sum: number, item: any) => sum + (item.price * item.quantity), 0);
+      const taxRate = 0.08;
+      const tax = subtotal * taxRate;
+      const total = subtotal + tax;
 
-    const orderId = generateId();
-    const now = new Date().toISOString();
+      const orderId = generateId();
+      const now = new Date().toISOString();
 
-    // Create order
-    db.prepare(`
-      INSERT INTO orders (id, table_id, customer_id, server_id, subtotal, tax, total, status, notes, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
-    `).run(orderId, tableId, customerId, serverId, subtotal, tax, total, notes, now, now);
+      // Create order
+      await client.query(
+        `INSERT INTO orders (id, table_id, customer_id, server_id, subtotal, tax, total, status, notes, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, $10)`,
+        [orderId, tableId, customerId, serverId, subtotal, tax, total, notes, now, now]
+      );
 
-    // Create order items
-    const insertItem = db.prepare(`
-      INSERT INTO order_items (id, order_id, menu_item_id, quantity, price, notes, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
-    `);
+      // Create order items
+      for (const item of items) {
+        const itemId = generateId();
+        await client.query(
+          `INSERT INTO order_items (id, order_id, menu_item_id, quantity, price, notes, status, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)`,
+          [itemId, orderId, item.menuItemId, item.quantity, item.price, item.notes || null, now, now]
+        );
+      }
 
-    for (const item of items) {
-      const itemId = generateId();
-      insertItem.run(itemId, orderId, item.menuItemId, item.quantity, item.price, item.notes || null, now, now);
-    }
+      // Update table status
+      await client.query(
+        'UPDATE tables SET current_order_id = $1, status = $2 WHERE id = $3',
+        [orderId, 'occupied', tableId]
+      );
 
-    // Update table status
-    db.prepare('UPDATE tables SET current_order_id = ?, status = ? WHERE id = ?')
-      .run(orderId, 'occupied', tableId);
+      return orderId;
+    });
 
-    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
-    const orderItems = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(orderId);
+    const orderResult = await query('SELECT * FROM orders WHERE id = $1', [result]);
+    const itemsResult = await query('SELECT * FROM order_items WHERE order_id = $1', [result]);
 
-    return NextResponse.json({ ...order, items: orderItems }, { status: 201 });
+    return NextResponse.json({ ...orderResult.rows[0], items: itemsResult.rows }, { status: 201 });
   } catch (error) {
     console.error('Error creating order:', error);
     return NextResponse.json({ error: 'Failed to create order' }, { status: 500 });
@@ -120,44 +126,44 @@ export async function PUT(request: NextRequest) {
     const { id, status, discount, tip, paymentMethod } = body;
     const now = new Date().toISOString();
 
-    let query = 'UPDATE orders SET status = ?, updated_at = ?';
+    let queryText = 'UPDATE orders SET status = $1, updated_at = $2';
     const params: (string | number | null)[] = [status, now];
 
     if (discount !== undefined) {
-      query += ', discount = ?';
+      queryText = 'UPDATE orders SET discount = $1, ' + queryText.substring(queryText.indexOf('SET') + 4);
       params.unshift(discount);
     }
 
     if (tip !== undefined) {
-      query += ', tip = ?';
+      queryText = 'UPDATE orders SET tip = $1, ' + queryText.substring(queryText.indexOf('SET') + 4);
       params.unshift(tip);
     }
 
     if (paymentMethod) {
-      query += ', payment_method = ?, paid_at = ?';
+      queryText = 'UPDATE orders SET payment_method = $1, paid_at = $2, ' + queryText.substring(queryText.indexOf('SET') + 4);
       params.unshift(now, paymentMethod);
     }
 
-    query += ' WHERE id = ?';
+    queryText += ' WHERE id = $' + (params.length + 1);
     params.push(id);
 
-    db.prepare(query).run(...params);
+    await query(queryText, params);
 
     // If order is paid, update table status
     if (status === 'paid') {
-      const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id) as any;
+      const orderResult = await query('SELECT * FROM orders WHERE id = $1', [id]);
+      const order = orderResult.rows[0];
       if (order?.table_id) {
-        db.prepare('UPDATE tables SET current_order_id = NULL, status = ? WHERE id = ?')
-          .run('cleaning', order.table_id);
+        await query('UPDATE tables SET current_order_id = NULL, status = $1 WHERE id = $2', ['cleaning', order.table_id]);
       }
     }
 
-    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
-    if (!order) {
+    const result = await query('SELECT * FROM orders WHERE id = $1', [id]);
+    if (!result.rows[0]) {
       return NextResponse.json({ error: 'Order not found' }, { status: 404 });
     }
 
-    return NextResponse.json(order);
+    return NextResponse.json(result.rows[0]);
   } catch (error) {
     console.error('Error updating order:', error);
     return NextResponse.json({ error: 'Failed to update order' }, { status: 500 });
