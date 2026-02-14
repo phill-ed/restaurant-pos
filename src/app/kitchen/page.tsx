@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { usePOS } from '@/context/POSContext';
 import MainLayout from '@/components/layout/MainLayout';
 import { 
@@ -9,7 +9,9 @@ import {
   ChefHat, 
   AlertCircle,
   Filter,
-  RefreshCw
+  RefreshCw,
+  Printer,
+  X
 } from 'lucide-react';
 import { Order, OrderItem } from '@/types';
 
@@ -19,6 +21,9 @@ export default function KitchenPage() {
   const { activeOrders, updateOrder, updateOrderItemStatus, tables } = usePOS();
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [currentTime, setCurrentTime] = useState(new Date());
+  const [printOrder, setPrintOrder] = useState<Order | null>(null);
+  const [showPrintModal, setShowPrintModal] = useState(false);
+  const printRef = useRef<HTMLDivElement>(null);
 
   // Update time every minute
   useEffect(() => {
@@ -78,6 +83,129 @@ export default function KitchenPage() {
     return table?.number || tableId;
   };
 
+  const handlePrintTicket = (order: Order) => {
+    setPrintOrder(order);
+    setShowPrintModal(true);
+  };
+
+  const handlePrint = () => {
+    if (printRef.current) {
+      const printContent = printRef.current.innerHTML;
+      const printWindow = window.open('', '_blank');
+      if (printWindow) {
+        printWindow.document.write(`
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>Kitchen Ticket - ${printOrder?.table ? `Table ${getTableNumber(printOrder.tableId)}` : printOrder?.id}</title>
+            <style>
+              @page {
+                size: 58mm auto;
+                margin: 0;
+              }
+              * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+              }
+              body {
+                font-family: 'Courier New', monospace;
+                font-size: 10px;
+                line-height: 1.3;
+                width: 58mm;
+                padding: 5px;
+                color: #000;
+              }
+              .ticket {
+                width: 100%;
+              }
+              .header {
+                text-align: center;
+                border-bottom: 1px dashed #000;
+                padding-bottom: 5px;
+                margin-bottom: 8px;
+              }
+              .header h1 {
+                font-size: 14px;
+                font-weight: bold;
+                margin-bottom: 2px;
+              }
+              .header p {
+                font-size: 9px;
+                color: #666;
+              }
+              .info {
+                display: flex;
+                justify-content: space-between;
+                margin-bottom: 8px;
+                font-size: 10px;
+              }
+              .info strong {
+                font-weight: bold;
+              }
+              .items {
+                border-top: 1px dashed #000;
+                border-bottom: 1px dashed #000;
+                padding: 5px 0;
+                margin-bottom: 8px;
+              }
+              .item {
+                display: flex;
+                justify-content: space-between;
+                margin-bottom: 3px;
+              }
+              .item:last-child {
+                margin-bottom: 0;
+              }
+              .item-qty {
+                font-weight: bold;
+                min-width: 30px;
+              }
+              .item-name {
+                flex: 1;
+                padding-left: 5px;
+              }
+              .item-note {
+                font-size: 8px;
+                color: #666;
+                font-style: italic;
+              }
+              .notes {
+                margin-bottom: 8px;
+                font-size: 9px;
+              }
+              .notes strong {
+                display: block;
+                margin-bottom: 2px;
+              }
+              .footer {
+                text-align: center;
+                font-size: 8px;
+                color: #666;
+              }
+              @media print {
+                body {
+                  -webkit-print-color-adjust: exact;
+                  print-color-adjust: exact;
+                }
+              }
+            </style>
+          </head>
+          <body>
+            ${printContent}
+          </body>
+          </html>
+        `);
+        printWindow.document.close();
+        printWindow.focus();
+        setTimeout(() => {
+          printWindow.print();
+          printWindow.close();
+        }, 250);
+      }
+    }
+  };
+
   return (
     <MainLayout>
       <div className="space-y-6">
@@ -93,9 +221,19 @@ export default function KitchenPage() {
             </div>
           </div>
           
-          <div className="flex items-center gap-2 text-sm text-slate-500">
-            <Clock size={16} />
-            <span>{currentTime.toLocaleTimeString()}</span>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2 text-sm text-slate-500">
+              <Clock size={16} />
+              <span>{currentTime.toLocaleTimeString()}</span>
+            </div>
+            
+            <button
+              onClick={() => window.location.reload()}
+              className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+              title="Refresh"
+            >
+              <RefreshCw size={18} className="text-slate-600" />
+            </button>
           </div>
         </div>
 
@@ -200,21 +338,106 @@ export default function KitchenPage() {
                 </div>
 
                 {/* Order Actions */}
-                {order.status === 'ready' && (
-                  <div className="p-3 border-t border-slate-200">
+                <div className="p-3 border-t border-slate-200 flex gap-2">
+                  <button
+                    onClick={() => handlePrintTicket(order)}
+                    className="flex-1 btn btn-secondary flex items-center justify-center gap-2 text-sm"
+                  >
+                    <Printer size={16} />
+                    Print
+                  </button>
+                  {order.status === 'ready' && (
                     <button
                       onClick={() => handleCompleteOrder(order.id)}
-                      className="w-full btn btn-primary"
+                      className="flex-1 btn btn-primary"
                     >
-                      Mark Served
+                      Served
                     </button>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
             ))}
           </div>
         )}
       </div>
+
+      {/* Print Modal */}
+      {showPrintModal && printOrder && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl w-full max-w-sm">
+            <div className="p-4 border-b border-slate-200 flex items-center justify-between">
+              <h2 className="text-lg font-semibold">Kitchen Ticket</h2>
+              <button 
+                onClick={() => setShowPrintModal(false)} 
+                className="p-1 hover:bg-slate-100 rounded"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            
+            <div className="p-4">
+              {/* Preview */}
+              <div 
+                ref={printRef}
+                className="ticket bg-white border border-slate-300 rounded-lg p-4 mb-4"
+                style={{ width: '280px', margin: '0 auto', fontFamily: 'Courier New, monospace' }}
+              >
+                <div className="header">
+                  <h1>🍽️ RESTAURANT POS</h1>
+                  <p>123 Main Street</p>
+                </div>
+                
+                <div className="info">
+                  <div>
+                    <strong>Ticket:</strong> {printOrder.id.slice(-6)}
+                  </div>
+                  <div>
+                    <strong>Table:</strong> {getTableNumber(printOrder.tableId)}
+                  </div>
+                </div>
+                
+                <div className="info">
+                  <div>
+                    <strong>Time:</strong> {new Date(printOrder.createdAt).toLocaleTimeString()}
+                  </div>
+                  <div>
+                    <strong>Date:</strong> {new Date(printOrder.createdAt).toLocaleDateString()}
+                  </div>
+                </div>
+                
+                <div className="items">
+                  {printOrder.items.map(item => (
+                    <div key={item.id} className="item">
+                      <span className="item-qty">{item.quantity}x</span>
+                      <span className="item-name">{item.menuItem.name}</span>
+                    </div>
+                  ))}
+                </div>
+                
+                <div className="footer">
+                  <p>KITCHEN ORDER</p>
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={handlePrint}
+                  className="flex-1 btn btn-primary flex items-center justify-center gap-2"
+                >
+                  <Printer size={18} />
+                  Print Ticket
+                </button>
+                <button
+                  onClick={() => setShowPrintModal(false)}
+                  className="flex-1 btn btn-secondary"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </MainLayout>
   );
 }
